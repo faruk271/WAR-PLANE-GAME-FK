@@ -1,0 +1,1144 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<title>WAR PLANE</title>
+<style>
+  /* Tasarımı biraz daha sadeleştirdik (gerekli olanlar hariç) */
+  body { margin:0; overflow:hidden; background:#87ceeb; }
+  canvas { display:block; }
+</style>
+</head>
+<body>
+
+<canvas id="game"></canvas>
+
+<audio id="bgMusic" src="music.mp3" loop></audio>
+<audio id="hitSound" src="hit.mp3"></audio>
+<audio id="powerupSound" src="powerup.mp3"></audio>
+<audio id="buySound" src="buy.mp3"></audio> 
+
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const bgMusic = document.getElementById("bgMusic");
+const hitSound = document.getElementById("hitSound");
+const powerupSound = document.getElementById("powerupSound");
+const buySound = document.getElementById("buySound");
+
+/* === RESPONSIVE === */
+function resize(){
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener("resize", resize);
+resize();
+
+/* === GÖRSELLER === */
+// Gerekli görsellerin yüklenme durumunu kontrol etmiyoruz,
+// bu yüzden görsel dosyalarınızın (airplane2.png, boss.png vb.)
+// mevcut olduğundan emin olun.
+const enemyImg  = new Image(); enemyImg.src  = "airplane2.png";
+const bossImg   = new Image(); bossImg.src   = "boss.png";
+const cloudImg  = new Image(); cloudImg.src  = "cloud.png";
+const welcomeImg= new Image(); welcomeImg.src= "welcome.png"; 
+const heartImg  = new Image(); heartImg.src  = "heart.png";
+
+/* === OYUNCU KOSTÜMLERİ (MARKET) === */
+const skins = {
+  'default': { src: "airplane1.png", price: 0, unlocked: true },
+  'skin2':   { src: "skin2.png", price: 100, unlocked: false }, 
+  'skin3':   { src: "skin3.png", price: 300, unlocked: false }  
+};
+let activeSkinKey = 'default';
+const playerImg = new Image(); playerImg.src = skins[activeSkinKey].src; 
+
+/* === OYUN DURUMU & KALICI DEĞİŞKENLER === */
+let gameState = "welcome"; 
+const MARKET_KEY = "KeyM"; 
+const PAUSE_KEY = "KeyP";
+const MENU_KEY = "KeyE"; 
+const STAGES_KEY = "KeyL"; 
+
+// YENİ KONSTANTLAR
+const SHIELD_DURATION = 300; // 5 saniye (60 FPS * 5)
+const FAST_ENEMY_SPAWN_CHANCE = 0.2; // %20 hızlı düşman
+
+// YENİ: Local Storage Anahtarları
+const STORAGE_COINS_KEY = "farukGameCoins";
+const STORAGE_MAX_STAGE_KEY = "farukGameMaxStage";
+const STORAGE_HIGHSCORE_KEY = "farukGameHighScore";
+const STORAGE_UPGRADES_KEY = "farukGameUpgrades";
+
+let totalCoins = 0; 
+let highScore = 0; 
+let maxUnlockedStage = 1; 
+
+const BASE_PLAYER_LIVES = 5;
+const BASE_PLAYER_SPEED = 7;
+const BASE_FIRE_COOLDOWN = 15; 
+
+// YENİ UPGRADES EKLENDİ
+let upgrades = {
+    damage: { level: 1, max: 5, basePrice: 100, priceMultiplier: 2, currentPrice: 100 },
+    fireRate: { level: 1, max: 5, basePrice: 150, priceMultiplier: 2.5, currentPrice: 150 },
+    maxLives: { level: 1, max: 3, basePrice: 200, priceMultiplier: 3, currentPrice: 200 },
+    speed: { level: 1, max: 5, basePrice: 50, priceMultiplier: 1.5, currentPrice: 50 },
+    luck: { level: 1, max: 3, basePrice: 150, priceMultiplier: 2, currentPrice: 150 },
+    bulletWidth: { level: 1, max: 3, basePrice: 100, priceMultiplier: 2.5, currentPrice: 100 }
+};
+let marketSubState = "skins"; 
+
+/* === BÖLÜM (STAGE) SİSTEMİ === */
+const MAX_STAGE = 5; 
+const STAGE_COINS = 500; 
+let currentStage = 1; 
+
+// YENİ: Otomatik Zorluk Haritası
+const STAGE_DIFFICULTY_MAP = {
+    1: "easy",
+    2: "easy",
+    3: "medium",
+    4: "medium",
+    5: "hard"
+};
+
+/* === ARKAPLAN === */
+let bgY1 = 0, bgY2 = -canvas.height;
+
+/* === OYUNCU & OYUN (Geçici) === */
+let player, currentScore, level, kills;
+let fireTimer = 0; 
+let damageFlashTimer = 0; // YENİ: Hasar geri bildirimi için
+
+/* === NESNELER === */
+let bullets = [], enemyBullets = [], explosions = [], powerups = [];
+let enemies = []; // 'enemies' tanımı yukarıdaydı, burada kalsın.
+let boss = null;
+
+/* === ZORLUK AYARLARI === */
+let difficulty = "medium";
+let enemySpawnRate = 1200;
+let enemySpeedMultiplier = 1;
+let powerupSpawnChance = 0.1;
+
+/* === SPAWN INTERVALS === */
+let spawnInterval;
+let powerupInterval;
+
+/* === LOCAL STORAGE YÖNETİMİ === */
+function updateUpgradePrices() {
+    Object.keys(upgrades).forEach(key => {
+        const upgrade = upgrades[key];
+        upgrade.currentPrice = Math.round(upgrade.basePrice * Math.pow(upgrade.priceMultiplier, upgrade.level - 1));
+    });
+}
+
+function loadGameData() {
+    totalCoins = parseInt(localStorage.getItem(STORAGE_COINS_KEY) || '0', 10);
+    maxUnlockedStage = parseInt(localStorage.getItem(STORAGE_MAX_STAGE_KEY) || '1', 10);
+    highScore = parseInt(localStorage.getItem(STORAGE_HIGHSCORE_KEY) || '0', 10);
+    
+    const savedUpgrades = localStorage.getItem(STORAGE_UPGRADES_KEY);
+    if (savedUpgrades) {
+        const loaded = JSON.parse(savedUpgrades);
+        Object.keys(upgrades).forEach(key => {
+            if (loaded[key] && loaded[key].level !== undefined) {
+                upgrades[key].level = loaded[key].level;
+            }
+        });
+    }
+    updateUpgradePrices(); 
+}
+
+function saveGameData() {
+    localStorage.setItem(STORAGE_COINS_KEY, totalCoins.toString());
+    localStorage.setItem(STORAGE_MAX_STAGE_KEY, maxUnlockedStage.toString());
+    localStorage.setItem(STORAGE_HIGHSCORE_KEY, highScore.toString());
+    
+    const levelsToSave = {};
+    Object.keys(upgrades).forEach(key => {
+        levelsToSave[key] = { level: upgrades[key].level };
+    });
+    localStorage.setItem(STORAGE_UPGRADES_KEY, JSON.stringify(levelsToSave));
+}
+
+
+/* === KONTROLLER (DÜZELTİLDİ) === */
+const keys = {};
+document.addEventListener("keydown", e => {
+  keys[e.code] = true;
+  
+  // PAUSE
+  if (e.code === PAUSE_KEY && (gameState === "playing" || gameState === "boss")) {
+    gameState = "paused";
+  } else if (e.code === PAUSE_KEY && gameState === "paused") {
+    gameState = (boss) ? "boss" : "playing"; 
+  }
+  
+  // ANA MENÜYE DÖN
+  if (e.code === MENU_KEY && gameState === "paused") {
+      resetGame(); 
+      gameState = "welcome";
+  }
+
+  // Market Ekranı Kontrolü (M tuşu) - Düzeltilmiş Mantık
+  if(e.code === MARKET_KEY){
+    if (gameState === "market") {
+        gameState = "welcome"; // Market açıksa kapat
+    } else if (gameState === "welcome") {
+        gameState = "market"; // Welcome'daysa aç
+        marketSubState = "skins";
+    }
+    // Diğer tüm durumlarda (stageselection, playing, paused...) M tuşu etkisizdir.
+  }
+  
+  // Bölüm Seçim Ekranı Kontrolü (L tuşu) - DÜZELTİLDİ
+  // Bu kontrol L tuşuna basıldığında menüyü açıp kapamaktan sorumludur.
+  if(e.code === STAGES_KEY){
+    if (gameState === "stageselection") {
+        gameState = "welcome"; // Stages açıksa kapat
+    } else if (gameState === "welcome") {
+        gameState = "stageselection"; // Welcome'daysa aç
+    }
+    // Diğer tüm durumlarda (market, playing, paused...) L tuşu etkisizdir.
+  }
+
+  // Market Alt Sekme Kontrolü (A/D)
+  if (gameState === "market") {
+      if (e.code === "KeyA") marketSubState = "skins";
+      if (e.code === "KeyD") marketSubState = "upgrades";
+  }
+
+  if(gameState === "welcome"){
+    // Zorluk Seçimi Tuşları ARTIK YOK
+  } else if(e.code === "Enter" && gameState === "gameover"){
+    gameState = "welcome";
+  } else if(gameState === "market"){
+    handleMarketInput(e.code);
+  } else if (gameState === "stageselection") { 
+    handleStageSelectionInput(e.code); // handleStageSelectionInput sadece numara tuşlarına basıldığında çalışmalı.
+  } else if (e.code === "Enter" && gameState === "stageclear"){
+      if(currentStage <= MAX_STAGE) { 
+          startGame();
+      } else {
+          gameState = "welcome"; 
+      }
+  }
+
+  bgMusic.play().catch(()=>{});
+});
+document.addEventListener("keyup", e => keys[e.code] = false);
+
+// Bölüm Seçimi Giriş Yöneticisi
+function handleStageSelectionInput(keyCode) {
+    // STAGES_KEY (L tuşu) kontrolü ANA keydown bloğuna taşındı. Sadece ESC tuşu kontrolü kaldı.
+    if (keyCode === "Escape") { 
+        gameState = "welcome";
+        return;
+    }
+
+    const digitMatch = keyCode.match(/Digit(\d)|Numpad(\d)/);
+    if (digitMatch) {
+        const stageToSelect = parseInt(digitMatch[1] || digitMatch[2]);
+        // Seçilen stage maxUnlockedStage'den büyük olamaz
+        if (stageToSelect >= 1 && stageToSelect <= MAX_STAGE && stageToSelect <= maxUnlockedStage) {
+            currentStage = stageToSelect; // Başlanacak stage'i ayarla
+            
+            // Doğru stage'i seçtikten sonra direkt oyunu başlatıyoruz.
+            startGame(); // Oyunu başlat
+        }
+    }
+}
+
+// Kalıcı geliştirme değerlerini oyuncuya uygular.
+function applyUpgradesToPlayer() {
+    // Player objesi mevcut değilse bu fonksiyon çalışamaz.
+    if (!player) return;
+
+    player.damage = upgrades.damage.level; 
+    
+    const maxCooldownReduction = 12; 
+    const reductionStep = maxCooldownReduction / (upgrades.fireRate.max - 1); 
+    player.fireCooldown = BASE_FIRE_COOLDOWN - (upgrades.fireRate.level - 1) * reductionStep; 
+    
+    player.speed = BASE_PLAYER_SPEED + (upgrades.speed.level - 1) * 1.5;
+
+    // YENİ: Mermi Genişliği
+    player.bulletWidthMultiplier = upgrades.bulletWidth.level;
+}
+
+/* === MARKET KONTROLÜ === */
+function handleMarketInput(keyCode){
+  if(keyCode === "Escape") {
+    gameState = "welcome";
+    return;
+  }
+  
+  if (marketSubState === "skins") {
+      const keysArray = ["Digit1", "Digit2", "Digit3"];
+      if(keysArray.includes(keyCode)){
+        const skinIndex = keysArray.indexOf(keyCode);
+        const skinKeys = Object.keys(skins);
+        if(skinIndex >= 0 && skinIndex < skinKeys.length){
+          const keyToBuy = skinKeys[skinIndex];
+          buySkin(keyToBuy);
+        }
+      }
+  } else if (marketSubState === "upgrades") {
+      // YENİ: Tüm 6 yükseltmeyi kapsayacak şekilde düzeltildi ve genişletildi
+      const upgradeKeysArray = ["Digit1", "Digit2", "Digit3", "Digit4", "Digit5", "Digit6"]; 
+      const upgradeKeys = Object.keys(upgrades);
+
+      if(upgradeKeysArray.includes(keyCode)){
+        const upgradeIndex = upgradeKeysArray.indexOf(keyCode);
+        if(upgradeIndex >= 0 && upgradeIndex < upgradeKeys.length){
+          const keyToBuy = upgradeKeys[upgradeIndex];
+          buyUpgrade(keyToBuy);
+        }
+      }
+  }
+}
+
+function buySkin(key){
+  const skin = skins[key];
+  if(skin.unlocked){
+    activeSkinKey = key;
+    playerImg.src = skin.src;
+    buySound.currentTime = 0;
+    buySound.play();
+  } else if(totalCoins >= skin.price){ 
+    totalCoins -= skin.price; 
+    skin.unlocked = true;
+    activeSkinKey = key;
+    playerImg.src = skin.src;
+    buySound.currentTime = 0;
+    buySound.play();
+    saveGameData(); 
+  }
+}
+
+function buyUpgrade(key){
+  const upgrade = upgrades[key];
+
+  if(upgrade.level >= upgrade.max){
+  } else if(totalCoins >= upgrade.currentPrice){ 
+    totalCoins -= upgrade.currentPrice; 
+    upgrade.level++;
+    
+    upgrade.currentPrice = Math.round(upgrade.basePrice * Math.pow(upgrade.priceMultiplier, upgrade.level - 1));
+    
+    buySound.currentTime = 0;
+    buySound.play();
+    
+    if (player) applyUpgradesToPlayer();
+    saveGameData(); 
+    
+  } else {
+  }
+}
+
+// YENİ FONKSİYON: Bölüme Göre Zorluk Belirleme
+function getDifficultyByStage(stage) {
+    return STAGE_DIFFICULTY_MAP[stage] || "medium"; // Tanımlı değilse orta
+}
+
+/* === ZORLUK AYARI === */
+function setDifficulty(newDifficulty){
+  difficulty = newDifficulty;
+  let basePowerupChance = 0.10; // Ortak temel değer
+  
+  switch(difficulty){
+    case "easy":
+      enemySpawnRate = 1800;
+      enemySpeedMultiplier = 0.8;
+      basePowerupChance = 0.15; // Kolayda daha yüksek
+      break;
+    case "medium":
+      enemySpawnRate = 1200;
+      enemySpeedMultiplier = 1;
+      basePowerupChance = 0.10;
+      break;
+    case "hard":
+      enemySpawnRate = 800;
+      enemySpeedMultiplier = 1.3;
+      basePowerupChance = 0.05; // Zorda daha düşük
+      break;
+  }
+  
+  // YENİ: Luck Upgrade'i Uygula
+  const luckBonus = (upgrades.luck.level - 1) * 0.05; // Her level +%5 şans
+  powerupSpawnChance = basePowerupChance + luckBonus; 
+  // Max %30 chance ile sınırlayalım
+  powerupSpawnChance = Math.min(powerupSpawnChance, 0.30); 
+}
+
+/* === SIFIRLAMA FONKSİYONU === */
+function resetGame(){
+    clearInterval(spawnInterval);
+    clearInterval(powerupInterval);
+    bgMusic.pause();
+    
+    player = null; 
+    currentScore = 0;
+    level = 1;
+    kills = 0;
+    currentStage = 1; 
+
+    bullets = [];
+    enemyBullets = [];
+    enemies = [];
+    explosions = [];
+    powerups = [];
+    boss = null;
+    fireTimer = 0; 
+    damageFlashTimer = 0; // Sıfırla
+}
+
+/* === BAŞLAT === */
+function startGame(){
+  gameState = "playing";
+  
+  currentScore = 0; 
+  level = 1;
+  kills = 0;
+
+  if (!player) {
+     player = {
+        x: canvas.width/2 - 25,
+        y: canvas.height - 120,
+        w: 50, h: 50,
+        lives: BASE_PLAYER_LIVES + (upgrades.maxLives.level - 1) * 1, 
+        shieldTimer: 0, // YENİ
+        baseBulletWidth: 4, // YENİ
+     };
+  } else {
+     player.x = canvas.width/2 - 25;
+     player.y = canvas.height - 120;
+     // Max can seviyesi yükseltildi ise canı fulle
+     player.lives = BASE_PLAYER_LIVES + (upgrades.maxLives.level - 1) * 1;
+     player.shieldTimer = 0; // YENİ: Oyun başladığında kalkanı sıfırla
+  }
+  
+  applyUpgradesToPlayer();
+
+  bullets = [];
+  enemyBullets = [];
+  enemies = [];
+  explosions = [];
+  powerups = [];
+  boss = null;
+  fireTimer = 0; 
+  damageFlashTimer = 0;
+
+  // Yeni: Bölüme göre zorluğu ayarla
+  const calculatedDifficulty = getDifficultyByStage(currentStage);
+  setDifficulty(calculatedDifficulty); 
+
+  bgMusic.currentTime = 0;
+  bgMusic.play();
+
+  if(spawnInterval) clearInterval(spawnInterval);
+  spawnInterval = setInterval(spawnEnemy, enemySpawnRate);
+  
+  if(powerupInterval) clearInterval(powerupInterval);
+  powerupInterval = setInterval(spawnPowerup, 4000); 
+}
+
+/* === DÜŞMAN, BOSS, POWER-UP SPAWN FONKSİYONLARI === */
+function spawnEnemy(){
+  if(gameState !== "playing" && gameState !== "boss") return;
+  
+  const isFast = Math.random() < FAST_ENEMY_SPAWN_CHANCE; // %20 şans
+  
+  enemies.push({
+    x: Math.random() * (canvas.width - 50),
+    y: -60,
+    w: isFast ? 40 : 50, // Hızlı düşman biraz daha küçük
+    h: isFast ? 40 : 50, 
+    speed: (isFast ? 1.5 : 1) * (2 + level * 0.3 + currentStage * 0.5) * enemySpeedMultiplier, 
+    shootTimer: 0,
+    health: isFast ? 0.5 : 1, // Hızlı düşmanın canı az
+    type: isFast ? "fast" : "normal" // YENİ
+  });
+}
+
+function spawnPowerup(){
+  if(gameState !== "playing" && gameState !== "boss") return;
+  if(Math.random() < powerupSpawnChance){ 
+    
+    // YENİ: %50 Can, %50 Kalkan
+    const type = Math.random() < 0.5 ? "life" : "shield";
+    
+    powerups.push({
+      x: Math.random() * (canvas.width - 30), 
+      y: -30, 
+      w: 30, 
+      h: 30, 
+      speed: 3,
+      type: type // YENİ
+    });
+  }
+}
+
+function spawnBoss(){
+  boss = {
+    x: canvas.width/2 - 100,
+    y: -200,
+    w: 200, h: 200,
+    speed: 1,
+    lives: 30 + currentStage * 10, 
+    shootTimer: 0 
+  };
+  gameState = "boss";
+}
+
+function explode(x,y){
+  explosions.push({x,y,r:0});
+}
+
+/* === UPDATE === */
+function update(){
+  if(gameState === "welcome" || gameState === "gameover" || gameState === "market" || gameState === "paused" || gameState === "stageclear" || gameState === "stageselection") return;
+
+  bgY1 += 1.5; bgY2 += 1.5;
+  if(bgY1 >= canvas.height) bgY1 = bgY2 - canvas.height;
+  if(bgY2 >= canvas.height) bgY2 = bgY1 - canvas.height;
+
+  fireTimer++;
+  
+  // YENİ: Kalkan zamanlayıcısını güncelle
+  if (player && player.shieldTimer > 0) {
+      player.shieldTimer--;
+  }
+  
+  // YENİ: Hasar flash zamanlayıcısını güncelle
+  if (damageFlashTimer > 0) {
+      damageFlashTimer--;
+  }
+
+
+  // Oyuncu hareketleri
+  if(keys.ArrowLeft && player.x > 0) player.x -= player.speed;
+  if(keys.ArrowRight && player.x + player.w < canvas.width) player.x += player.speed;
+  if(keys.ArrowUp && player.y > 0) player.y -= player.speed;
+  if(keys.ArrowDown && player.y + player.h < canvas.height) player.y += player.speed;
+
+  // Atış (Mermi genişliği kullanıldı)
+  if(keys.Space && fireTimer >= player.fireCooldown){
+    const width = player.baseBulletWidth * player.bulletWidthMultiplier;
+    // Mermiyi ortalamak için x'i ayarla
+    bullets.push({x: player.x + player.w/2 - width/2, y: player.y, s: 9, w: width});
+    fireTimer = 0; 
+  }
+
+  // Nesne hareketleri
+  bullets.forEach(b => b.y -= b.s);
+  enemyBullets.forEach(b => b.y += b.s);
+  powerups.forEach(p => p.y += p.speed);
+
+  // Ekran dışı temizlik
+  bullets = bullets.filter(b => b.y > 0);
+  enemyBullets = enemyBullets.filter(b => b.y < canvas.height);
+  powerups = powerups.filter(p => p.y < canvas.height);
+  enemies = enemies.filter(e => e.y < canvas.height);
+
+  // Düşman hareket ve atış
+  enemies.forEach(e => {
+    e.y += e.speed;
+    e.shootTimer++;
+    // Hızlı düşman ateş etmez
+    if(e.type === "normal" && e.shootTimer > 90 / enemySpeedMultiplier){
+      enemyBullets.push({x: e.x + 25, y: e.y + 50, s: 6});
+      e.shootTimer = 0;
+    }
+  });
+
+  /* === BİZ DÜŞMANI VURDUK === */
+  for(let i=enemies.length-1;i>=0;i--){
+    for(let j=bullets.length-1;j>=0;j--){
+      const e=enemies[i], b=bullets[j];
+      
+      // Mermi genişliği kullanılarak çarpışma kontrolü
+      if(b.x < e.x + e.w && b.x + b.w > e.x && b.y < e.y + e.h && b.y + 10 > e.y){
+        
+        bullets.splice(j,1); 
+        
+        e.health -= player.damage; 
+        
+        if (e.health <= 0) {
+            hitSound.currentTime = 0; 
+            hitSound.play();
+            explode(e.x+e.w/2,e.y+e.h/2); 
+            
+            enemies.splice(i,1);
+            
+            // YENİ: Hızlı düşman ödülü
+            if (e.type === "fast") {
+                currentScore += 20; 
+                totalCoins += 20; 
+            } else {
+                currentScore += 10; 
+                totalCoins += 10; 
+            }
+            
+            kills++;
+            
+            if(kills % 30 === 0){ 
+              level++;
+            }
+            
+            // 150 SKOR (15 KILLS) SONRASI BOSS
+            if(kills >= 15 && boss === null){ 
+                 spawnBoss();
+                 kills = 0; 
+            }
+            break;
+        }
+      }
+    }
+  }
+
+  /* === BİZ VURULDUK (Kalkan Kontrolü Eklendi) === */
+  for(let i=enemyBullets.length-1;i>=0;i--){
+    const b = enemyBullets[i];
+    if(
+      b.x < player.x + player.w &&
+      b.x + 4 > player.x &&
+      b.y < player.y + player.h &&
+      b.y + 10 > player.y
+    ){
+      enemyBullets.splice(i,1);
+      hitSound.currentTime = 0;
+      hitSound.play();
+      
+      // YENİ: KALKAN KONTROLÜ
+      if (player.shieldTimer > 0) {
+          player.shieldTimer = 0; // Kalkanı tüket
+          // Kalkan patlaması (daha küçük olabilir)
+          explosions.push({x: player.x + 25, y: player.y + 25, r: 0, shield: true}); 
+      } else {
+          player.lives--;
+          damageFlashTimer = 10; // 10 frame kırmızı flash
+          explode(player.x + 25, player.y + 25);
+      }
+
+      if(player.lives <= 0 && player.shieldTimer <= 0){
+        gameState = "gameover";
+        bgMusic.pause();
+        clearInterval(spawnInterval);
+        clearInterval(powerupInterval);
+        
+        if (currentScore > highScore) { 
+            highScore = currentScore;
+        }
+        saveGameData(); 
+      }
+      break;
+    }
+  }
+
+  /* === POWER-UP TOPLADIK (Kalkan Power-Up'ı Eklendi) === */
+  for(let i=powerups.length-1;i>=0;i--){
+    const p = powerups[i];
+    if(
+      p.x < player.x + player.w &&
+      p.x + p.w > player.x &&
+      p.y < player.y + player.h &&
+      p.y + p.h > player.y
+    ){
+      powerups.splice(i,1);
+      powerupSound.currentTime = 0;
+      powerupSound.play();
+      
+      if (p.type === "life") {
+          const maxLives = BASE_PLAYER_LIVES + (upgrades.maxLives.level - 1) * 1;
+          if (player.lives < maxLives) {
+              player.lives++;
+          }
+      } else if (p.type === "shield") {
+          player.shieldTimer = SHIELD_DURATION;
+      }
+      
+      break;
+    }
+  }
+
+  /* === BOSS KONTROLÜ (Vuruldu ve Ateş Etme) === */
+  if(boss){
+    boss.y += boss.speed;
+    
+    // BOSS Ateş Etme
+    boss.shootTimer++;
+    if(boss.shootTimer > 60){ 
+      enemyBullets.push({x: boss.x + 50, y: boss.y + 200, s: 8});
+      enemyBullets.push({x: boss.x + boss.w - 50, y: boss.y + 200, s: 8});
+      boss.shootTimer = 0;
+    }
+
+    for(let j=bullets.length-1;j>=0;j--){
+      const b=bullets[j];
+      if(b.x<boss.x+boss.w && b.x+b.w>boss.x && b.y<boss.y+boss.h && b.y+10>boss.y){
+        bullets.splice(j,1);
+        
+        boss.lives -= player.damage; 
+        
+        hitSound.currentTime = 0; 
+        hitSound.play();
+        explode(boss.x + boss.w/2, boss.y + boss.h/2);
+        
+        if(boss.lives <= 0){
+          currentScore += 100 * currentStage; 
+          boss = null;
+          
+          totalCoins += STAGE_COINS; 
+          currentStage++; 
+          
+          if (currentStage > MAX_STAGE) {
+              gameState = "gameover"; 
+              clearInterval(spawnInterval);
+              clearInterval(powerupInterval);
+              
+              if (currentScore > highScore) { 
+                  highScore = currentScore;
+              }
+              saveGameData(); 
+          } else {
+              gameState = "stageclear"; 
+              
+              if (currentStage > maxUnlockedStage) { 
+                  maxUnlockedStage = currentStage;
+              }
+              saveGameData(); 
+              
+              clearInterval(spawnInterval);
+              clearInterval(powerupInterval);
+          }
+        }
+      }
+    }
+  }
+
+  explosions.forEach(ex => ex.r += 3);
+  explosions = explosions.filter(ex => ex.r < 40);
+}
+
+/* === DRAW MARKET === */
+function drawSkinsMarket(){
+  ctx.fillStyle = "rgba(0, 0, 0, 0.9)";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.fillStyle = "white";
+  ctx.font = "50px Arial";
+  ctx.textAlign = "center";
+  ctx.fillText("UÇAK KOSTÜM MARKETİ", canvas.width / 2, 80);
+  
+  ctx.font = "30px Arial";
+  ctx.fillStyle = "yellow";
+  ctx.fillText("COINS (PARAN): " + totalCoins, canvas.width / 2, 140); 
+  
+  // Alt Sekmeler
+  ctx.font = "25px Arial";
+  ctx.fillStyle = "lime";
+  ctx.fillText("(A) KOSTÜMLER", canvas.width / 2 - 150, 200);
+  ctx.fillStyle = "gray";
+  ctx.fillText("(D) GELİŞTİRMELER", canvas.width / 2 + 150, 200);
+
+  const skinKeys = Object.keys(skins);
+  const startX = canvas.width / 2 - (skinKeys.length * 150) / 2 + 75; 
+  let currentX = startX;
+
+  skinKeys.forEach((key, index) => {
+    const skin = skins[key];
+    const isUnlocked = skin.unlocked;
+    const isSelected = activeSkinKey === key;
+    
+    ctx.strokeStyle = isSelected ? "lime" : (isUnlocked ? "lightblue" : "gray");
+    ctx.lineWidth = 5;
+    ctx.strokeRect(currentX - 60, canvas.height / 2 - 100, 120, 180);
+
+    const img = new Image();
+    img.src = skin.src;
+    ctx.drawImage(img, currentX - 50, canvas.height / 2 - 80, 100, 100);
+
+    ctx.font = "20px Arial";
+    ctx.fillStyle = "white";
+    ctx.fillText((index + 1) + ". Seçenek", currentX, canvas.height / 2 + 50);
+
+    ctx.font = "25px Arial";
+    if(isUnlocked){
+      ctx.fillStyle = isSelected ? "lime" : "white";
+      ctx.fillText(isSelected ? "SEÇİLİ" : "SEÇ", currentX, canvas.height / 2 + 90);
+    } else {
+      ctx.fillStyle = "yellow";
+      ctx.fillText(skin.price + " COINS", currentX, canvas.height / 2 + 90);
+    }
+
+    currentX += 150;
+  });
+
+  ctx.font = "25px Arial";
+  ctx.fillStyle = "red";
+  ctx.fillText("ESC ile Geri Dön", canvas.width / 2, canvas.height - 50);
+  ctx.textAlign = "left"; 
+}
+
+/* === DRAW UPGRADES MARKET (YENİ UPGRADELER EKLENDİ) === */
+function drawUpgradesMarket() {
+    ctx.fillStyle = "rgba(0, 0, 0, 0.9)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.fillStyle = "white";
+    ctx.font = "50px Arial";
+    ctx.textAlign = "center";
+    ctx.fillText("UÇAK GELİŞTİRMELERİ (UPGRADES)", canvas.width / 2, 80);
+    
+    ctx.font = "30px Arial";
+    ctx.fillStyle = "yellow";
+    ctx.fillText("COINS (PARAN): " + totalCoins, canvas.width / 2, 140); 
+    
+    // Alt Sekmeler
+    ctx.font = "25px Arial";
+    ctx.fillStyle = "gray";
+    ctx.fillText("(A) KOSTÜMLER", canvas.width / 2 - 150, 200);
+    ctx.fillStyle = "lime";
+    ctx.fillText("(D) GELİŞTİRMELER", canvas.width / 2 + 150, 200);
+
+    const upgradeKeys = Object.keys(upgrades); // Artık 6 tane
+    
+    // Çizim düzenini 2x3 ızgara olarak ayarlayalım
+    const numCols = 3;
+    const itemWidth = 180; // Genişlik artırıldı
+    const itemHeight = 180; // Yükseklik azaltıldı
+    const paddingX = 40;
+    const paddingY = 80; // Dikey boşluk artırıldı
+    const totalContentWidth = numCols * itemWidth + (numCols - 1) * paddingX;
+    
+    const initialX = (canvas.width - totalContentWidth) / 2 + itemWidth / 2;
+    const initialY = 250; 
+    
+    const labels = {
+        damage: "ATEŞ GÜCÜ",
+        fireRate: "HIZLI ATIŞ",
+        maxLives: "MAX CAN",
+        speed: "HAREKET HIZI",
+        luck: "POWER-UP ŞANSI", 
+        bulletWidth: "MERMİ GENİŞLİĞİ"
+    };
+
+    upgradeKeys.forEach((key, index) => {
+        const upgrade = upgrades[key];
+        const isMax = upgrade.level >= upgrade.max;
+        
+        const row = Math.floor(index / numCols);
+        const col = index % numCols;
+        
+        // Düzeltilmiş Y pozisyonu (paddingY'yi kullanarak daha okunaklı bir düzen)
+        const currentX = initialX + col * (itemWidth + paddingX);
+        const currentY = initialY + row * (itemHeight + paddingY);
+        
+        ctx.strokeStyle = "lightblue";
+        ctx.lineWidth = 3;
+        ctx.strokeRect(currentX - itemWidth / 2, currentY, itemWidth, itemHeight);
+
+        // İç Yazılar
+        let textY = currentY + 30; // Başlangıç Y
+        
+        ctx.font = "20px Arial";
+        ctx.fillStyle = "white";
+        ctx.fillText((index + 1) + ". " + labels[key], currentX, textY);
+
+        textY += 30;
+        ctx.font = "18px Arial";
+        ctx.fillStyle = "cyan";
+        ctx.fillText("SEVİYE: " + upgrade.level + " / " + upgrade.max, currentX, textY);
+        
+        textY += 40;
+        ctx.font = "25px Arial";
+        if(isMax){
+            ctx.fillStyle = "lime";
+            ctx.fillText("MAKS.", currentX, textY);
+        } else {
+            ctx.fillStyle = "yellow";
+            ctx.fillText(upgrade.currentPrice + " COINS", currentX, textY);
+        }
+        
+        // Gösterge (Bar)
+        textY += 30;
+        ctx.fillStyle = "gray";
+        ctx.fillRect(currentX - 70, textY, 140, 15); // Bar boyutu biraz küçüldü
+        ctx.fillStyle = "lime";
+        const progressWidth = (upgrade.level / upgrade.max) * 140;
+        ctx.fillRect(currentX - 70, textY, progressWidth, 15);
+    });
+
+    ctx.font = "25px Arial";
+    ctx.fillStyle = "red";
+    ctx.fillText("ESC ile Geri Dön | Satın Almak için Rakamlara Bas", canvas.width / 2, canvas.height - 50);
+    ctx.textAlign = "left"; 
+}
+
+/* === DRAW STAGE SELECTION (Zorluk bilgisi eklendi) === */
+function drawStageSelection() {
+    ctx.fillStyle = "rgba(0, 0, 0, 0.9)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.fillStyle = "white";
+    ctx.font = "50px Arial";
+    ctx.textAlign = "center";
+    ctx.fillText("BÖLÜM SEÇİM EKRANI", canvas.width / 2, 80);
+    
+    ctx.font = "30px Arial";
+    ctx.fillStyle = "yellow";
+    ctx.fillText("Toplam COINS: " + totalCoins, canvas.width / 2, 140); 
+
+    const numColumns = 3;
+    const stageWidth = 200;
+    const stageHeight = 100;
+    const padding = 50;
+    
+    const startY = canvas.height / 2 - stageHeight;
+
+    for (let i = 1; i <= MAX_STAGE; i++) {
+        const row = Math.floor((i - 1) / numColumns);
+        const col = (i - 1) % numColumns;
+        
+        const totalContentWidth = numColumns * stageWidth + (numColumns - 1) * padding;
+        const startX = canvas.width / 2 - totalContentWidth / 2;
+        const x = startX + col * (stageWidth + padding);
+        const y = startY + row * (stageHeight + padding);
+        
+        const isLocked = i > maxUnlockedStage;
+        const difficultyName = getDifficultyByStage(i).toUpperCase(); // Zorluk adını al
+
+        // Çerçeve
+        ctx.strokeStyle = isLocked ? "gray" : "lime";
+        ctx.lineWidth = 5;
+        ctx.strokeRect(x, y, stageWidth, stageHeight);
+
+        ctx.font = "30px Arial";
+        ctx.fillStyle = isLocked ? "gray" : "white";
+        ctx.fillText("BÖLÜM " + i, x + stageWidth / 2, y + stageHeight / 2 - 20);
+        
+        ctx.font = "20px Arial";
+        if (isLocked) {
+            ctx.fillStyle = "red";
+            ctx.fillText("KİLİTLİ", x + stageWidth / 2, y + stageHeight / 2 + 10);
+        } else {
+            ctx.fillStyle = (difficultyName === "HARD" ? "red" : (difficultyName === "MEDIUM" ? "orange" : "green"));
+            ctx.fillText("Zorluk: " + difficultyName, x + stageWidth / 2, y + stageHeight / 2 + 10);
+            ctx.fillStyle = "lime";
+            ctx.fillText("SEÇ: " + i, x + stageWidth / 2, y + stageHeight / 2 + 40);
+        }
+    }
+
+    ctx.font = "25px Arial";
+    ctx.fillStyle = "red";
+    ctx.fillText("ESC / L ile Geri Dön | Başlamak için Bölüm Numarasına Bas", canvas.width / 2, canvas.height - 50);
+    ctx.textAlign = "left"; 
+}
+
+
+/* === DRAW === */
+function draw(){
+  ctx.fillStyle="#87ceeb";
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.drawImage(cloudImg,0,bgY1,canvas.width,canvas.height);
+  ctx.drawImage(cloudImg,0,bgY2,canvas.width,canvas.height);
+
+  if(gameState==="welcome"){
+    ctx.drawImage(welcomeImg,canvas.width/2-200,canvas.height/2-200,400,300);
+    ctx.fillStyle="black";
+    ctx.textAlign = "center";
+    ctx.font="35px Arial";
+    // *** DEĞİŞİKLİK 1: Başlık metni
+    ctx.fillText("WAR PLANE", canvas.width/2, canvas.height/2+130); 
+    
+    // *** DEĞİŞİKLİK 2: Yapımcı metni
+    ctx.font="20px Arial"; 
+    ctx.fillText("YAPIMCI: Faruk Kırtıl", canvas.width/2, canvas.height/2+165); 
+    
+    ctx.fillStyle="purple";
+    ctx.font="25px Arial";
+    // Y pozisyonu ayarlandı: 170 -> 195
+    ctx.fillText("(M) Market | (L) Bölümler | COINS: " + totalCoins, canvas.width/2, canvas.height/2+195);
+
+    ctx.fillStyle="black";
+    ctx.font="30px Arial";
+    // Y pozisyonu ayarlandı: 210 -> 235
+    ctx.fillText("Başlamak için (L) BÖLÜMLER'i kullan",canvas.width/2,canvas.height/2+235);
+    
+    ctx.fillStyle="red";
+    ctx.font="25px Arial";
+    // Y pozisyonu ayarlandı: 250 -> 275
+    ctx.fillText("EN YÜKSEK SKOR: " + highScore, canvas.width/2, canvas.height/2+275);
+
+    ctx.textAlign = "left"; 
+    return;
+  }
+  
+  if(gameState === "market"){
+    if (marketSubState === "skins") {
+        drawSkinsMarket();
+    } else {
+        drawUpgradesMarket();
+    }
+    return;
+  }
+  
+  if(gameState === "stageselection"){ 
+    drawStageSelection();
+    return;
+  }
+
+  if(gameState==="gameover"){
+    ctx.fillStyle="black";
+    ctx.textAlign = "center";
+    ctx.font="50px Arial";
+    if (currentStage > MAX_STAGE) {
+        ctx.fillText("TÜM BÖLÜMLER BİTTİ!", canvas.width/2, canvas.height/2 - 40);
+    } else {
+        ctx.fillText("GAME OVER",canvas.width/2,canvas.height/2 - 40);
+    }
+    ctx.font="25px Arial";
+    ctx.fillText("Son SKOR: " + currentScore, canvas.width/2, canvas.height/2);
+    ctx.fillText("En Yüksek SKOR: " + highScore, canvas.width/2, canvas.height/2+40);
+    ctx.fillText("Toplam COINS: " + totalCoins, canvas.width/2, canvas.height/2+80);
+    ctx.fillText("ENTER ile Ana Menüye Dön",canvas.width/2,canvas.height/2+120);
+    ctx.textAlign = "left"; 
+    return;
+  }
+  
+  // Duraklatma Ekranı
+  if(gameState === "paused"){
+    ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "white";
+    ctx.font = "60px Arial";
+    ctx.textAlign = "center";
+    ctx.fillText("DURAKLATILDI", canvas.width / 2, canvas.height / 2 - 40);
+    ctx.font = "30px Arial";
+    ctx.fillText("(P) Devam Et", canvas.width / 2, canvas.height / 2 + 20);
+    ctx.fillStyle = "red";
+    ctx.fillText("(E) Ana Menüye Dön", canvas.width / 2, canvas.height / 2 + 70);
+    ctx.textAlign = "left"; 
+    return;
+  }
+  
+  // Stage Clear Ekranı
+  if(gameState === "stageclear"){
+    ctx.fillStyle = "rgba(0, 200, 0, 0.7)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "white";
+    ctx.font = "60px Arial";
+    ctx.textAlign = "center";
+    ctx.fillText("BÖLÜM " + (currentStage-1) + " BİTTİ!", canvas.width / 2, canvas.height / 2 - 60);
+    ctx.font = "30px Arial";
+    ctx.fillText("COINS Kazanıldı: " + STAGE_COINS, canvas.width / 2, canvas.height / 2);
+    ctx.fillText("Toplam COINS: " + totalCoins, canvas.width / 2, canvas.height / 2 + 40);
+    ctx.fillText("ENTER ile BÖLÜM " + currentStage + " Başla", canvas.width / 2, canvas.height / 2 + 100);
+    ctx.textAlign = "left"; 
+    return;
+  }
+
+  // Oyun içi çizimler
+  ctx.drawImage(playerImg,player.x,player.y,player.w,player.h);
+
+  // Mermi çizimi (genişliği kullanıldı)
+  ctx.fillStyle="yellow";
+  bullets.forEach(b=>ctx.fillRect(b.x,b.y,b.w,10));
+
+  ctx.fillStyle="red";
+  enemyBullets.forEach(b=>ctx.fillRect(b.x,b.y,4,10));
+
+  // Düşman çizimi (Hızlı düşman için renk/şekil değiştir)
+  enemies.forEach(e=>{
+      if (e.type === "fast") {
+          // Hızlı düşman: Kırmızı renkte. Normal görseli üzerine çiz.
+          ctx.fillStyle = "rgba(255, 0, 0, 0.5)"; // Kırmızı Gölge
+          ctx.fillRect(e.x, e.y, e.w, e.h);
+      }
+      ctx.drawImage(enemyImg,e.x,e.y,e.w,e.h);
+  });
+  
+  if(boss) {
+      ctx.drawImage(bossImg,boss.x,boss.y,boss.w,boss.h);
+      // Boss Can Göstergesi
+      ctx.fillStyle = "red";
+      const bossHealthWidth = (boss.lives / (30 + (currentStage * 10))) * boss.w;
+      ctx.fillRect(boss.x, boss.y - 10, bossHealthWidth, 5); 
+  }
+
+  // Powerup çizimi (Kalkan için farklı renk)
+  powerups.forEach(p=>{
+      if (p.type === "life") {
+          ctx.drawImage(heartImg,p.x,p.y,p.w,p.h);
+      } else if (p.type === "shield") {
+          // Kalkan: Mavi kare
+          ctx.fillStyle = "blue";
+          ctx.fillRect(p.x, p.y, p.w, p.h);
+      }
+  });
+
+  // YENİ: AKTİF KALKAN ÇİZİMİ
+  if (player && player.shieldTimer > 0) {
+      const shieldOpacity = 0.5 + Math.sin(Date.now() / 100) * 0.1; // Hafif titreme
+      ctx.strokeStyle = `rgba(0, 191, 255, ${shieldOpacity})`; 
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(player.x + player.w/2, player.y + player.h/2, player.w * 0.8, 0, Math.PI * 2);
+      ctx.stroke();
+      
+      ctx.fillStyle = `rgba(0, 191, 255, 0.2)`; 
+      ctx.fill();
+  }
+
+  // Patlamalar
+  explosions.forEach(ex=>{
+    ctx.beginPath();
+    ctx.arc(ex.x,ex.y,ex.r,0,Math.PI*2);
+    ctx.fillStyle="orange";
+    ctx.fill();
+  });
+  
+  // YENİ: HASAR FLASHI
+  if (damageFlashTimer > 0) {
+      ctx.fillStyle = `rgba(255, 0, 0, ${damageFlashTimer / 10 * 0.5})`;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+
+  // HUD
+  ctx.fillStyle="black";
+  ctx.font="20px Arial";
+  ctx.fillText("BÖLÜM: "+currentStage + "/" + MAX_STAGE,20,30); 
+  ctx.fillText("SKOR: "+currentScore,20,60); 
+  ctx.fillText("COINS: "+totalCoins,20,90); 
+  ctx.fillText("Can: "+player.lives,20,120);
+  ctx.fillText("Düşman Level: "+level,20,150);
+  ctx.fillText("Zorluk: "+difficulty.toUpperCase(), 20, 180);
+  ctx.fillText("DMG: " + player.damage, 20, 210); 
+  
+  // YENİ HUD BİLGİLERİ
+  ctx.fillStyle = "blue";
+  ctx.fillText("Mermi Genişliği: " + upgrades.bulletWidth.level, 20, 240);
+  
+  ctx.fillStyle = player.shieldTimer > 0 ? "lime" : "gray";
+  ctx.fillText("Kalkan: " + (player.shieldTimer > 0 ? "AKTİF" : "YOK"), 20, 270); 
+
+  ctx.fillStyle="black";
+  ctx.fillText("(P) Duraklat", canvas.width - 150, 30); 
+}
+
+function loop(){
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// Oyunu başlatmadan önce verileri yükle
+loadGameData(); 
+loop();
+</script>
+
+</body>
+</html>
